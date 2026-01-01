@@ -1,0 +1,353 @@
+openapi: 3.0.3
+info:
+  title: RAG Chatbot API
+  description: |
+    Real-time chat API for asking questions about book content using RAG (Retrieval-Augmented Generation).
+
+    **Key Features:**
+    - WebSocket-based real-time conversation
+    - Optional text selection for context-aware queries
+    - Citations to book sections for all answers
+    - Session-based context management
+
+    **Constitution Compliance:**
+    - Answers based solely on indexed book content (zero hallucination)
+    - All responses include citations to specific book sections
+    - Deterministic outputs using temperature=0.0
+
+  version: 1.0.0
+  contact:
+    name: RAG Chatbot Team
+    email: support@example.com
+
+servers:
+  - url: ws://localhost:8000
+    description: Local development server
+  - url: wss://api.example.com
+    description: Production server
+
+tags:
+  - name: Chat
+    description: WebSocket chat operations
+  - name: Health
+    description: Health check endpoints
+
+paths:
+  /ws/chat:
+    get:
+      summary: WebSocket chat connection
+      description: |
+        Establishes a WebSocket connection for real-time chat interaction.
+
+        **Connection Lifecycle:**
+        1. Client connects and receives `session_id`
+        2. Client sends `question` messages
+        3. Server responds with `answer_chunk` and `answer_complete`
+        4. Client disconnects (or server times out after 30 min)
+
+        **Message Flow:**
+        ```
+        Client → Server: {type: "question", ...}
+        Server → Client: {type: "answer_chunk", ...}
+        Server → Client: {type: "answer_complete", ...}
+        ```
+      tags:
+        - Chat
+      operationId: connectChat
+      responses:
+        "101":
+          description: WebSocket connection established
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id:
+                    type: string
+                    format: uuid
+                    description: Unique session identifier
+                required:
+                  - session_id
+
+  /health:
+    get:
+      summary: Health check
+      description: Returns API health status and service connectivity
+      tags:
+        - Health
+      operationId: healthCheck
+      responses:
+        "200":
+          description: All systems operational
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [healthy, degraded, unhealthy]
+                  services:
+                    type: object
+                    properties:
+                      qdrant:
+                        type: string
+                        enum: [connected, disconnected]
+                      cohere:
+                        type: string
+                        enum: [connected, disconnected]
+                      openai:
+                        type: string
+                        enum: [connected, disconnected]
+                  timestamp:
+                    type: string
+                    format: date-time
+                required:
+                  - status
+                  - services
+                  - timestamp
+        "503":
+          description: One or more services unavailable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [degraded, unhealthy]
+                  services:
+                    type: object
+                    properties:
+                      qdrant:
+                        type: string
+                        enum: [connected, disconnected]
+                      cohere:
+                        type: string
+                        enum: [connected, disconnected]
+                      openai:
+                        type: string
+                        enum: [connected, disconnected]
+                  timestamp:
+                    type: string
+                    format: date-time
+                required:
+                  - status
+                  - services
+                  - timestamp
+
+components:
+  schemas:
+    # WebSocket Message Types
+
+    BaseMessage:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          description: Message type discriminator
+          enum:
+            - session_init
+            - question
+            - answer_chunk
+            - answer_complete
+            - error
+
+    SessionInitMessage:
+      allOf:
+        - $ref: '#/components/schemas/BaseMessage'
+        - type: object
+          properties:
+            type:
+              enum: [session_init]
+            session_id:
+              type: string
+              format: uuid
+              description: Unique session identifier
+
+    QuestionMessage:
+      description: Client message with user question and optional selected text
+      allOf:
+        - $ref: '#/components/schemas/BaseMessage'
+        - type: object
+          required:
+            - question
+            - message_id
+          properties:
+            type:
+              enum: [question]
+            question:
+              type: string
+              minLength: 1
+              maxLength: 500
+              description: The user's question about book content
+              example: "How does RAG retrieval work?"
+            selected_text:
+              type: string
+              maxLength: 5000
+              description: |
+                Text highlighted/selected by user for context-aware query.
+                If provided, retrieval will prioritize matching content.
+              example: "RAG (Retrieval-Augmented Generation) combines retrieval..."
+            message_id:
+              type: string
+              format: uuid
+              description: Unique identifier for this message
+
+    AnswerChunkMessage:
+      description: Server message with partial streamed answer
+      allOf:
+        - $ref: '#/components/schemas/BaseMessage'
+        - type: object
+          required:
+            - content
+            - related_message_id
+          properties:
+            type:
+              enum: [answer_chunk]
+            content:
+              type: string
+              minLength: 1
+              description: Partial answer text (streamed token-by-token)
+              example: "RAG retrieval works by"
+            related_message_id:
+              type: string
+              format: uuid
+              description: ID of question this answer responds to
+
+    Citation:
+      type: object
+      required:
+        - chapter
+        - chunk_id
+        - relevance_score
+      properties:
+        chapter:
+          type: string
+          description: Chapter reference
+          example: "Chapter 1"
+        section:
+          type: string
+          nullable: true
+          description: Section within chapter (if applicable)
+          example: "RAG Architecture"
+        chunk_id:
+          type: integer
+          description: Unique chunk identifier
+          example: 42
+        relevance_score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: Semantic similarity score from retrieval
+          example: 0.89
+
+    AnswerCompleteMessage:
+      description: Server message with complete answer and citations
+      allOf:
+        - $ref: '#/components/schemas/BaseMessage'
+        - type: object
+          required:
+            - content
+            - citations
+            - confidence
+            - is_from_book
+            - related_message_id
+          properties:
+            type:
+              enum: [answer_complete]
+            content:
+              type: string
+              minLength: 1
+              maxLength: 2000
+              description: Complete answer text
+              example: "RAG retrieval works by querying a vector database..."
+            citations:
+              type: array
+              items:
+                $ref: '#/components/schemas/Citation'
+              description: References to book sections used
+            confidence:
+              type: number
+              format: float
+              minimum: 0.0
+              maximum: 1.0
+              description: Confidence score for answer quality
+              example: 0.87
+            is_from_book:
+              type: boolean
+              description: Whether answer was derived from book content
+              example: true
+            related_message_id:
+              type: string
+              format: uuid
+              description: ID of question this answer responds to
+            timestamp:
+              type: string
+              format: date-time
+              description: When answer was generated
+              example: "2025-12-30T14:30:15Z"
+
+    ErrorMessage:
+      description: Server message for errors
+      allOf:
+        - $ref: '#/components/schemas/BaseMessage'
+        - type: object
+          required:
+            - code
+            - message
+          properties:
+            type:
+              enum: [error]
+            code:
+              type: string
+              description: Error code for programmatic handling
+              enum:
+                - INVALID_INPUT
+                - RETRIEVAL_FAILED
+                - GENERATION_FAILED
+                - RATE_LIMIT_EXCEEDED
+                - SESSION_EXPIRED
+                - SERVICE_UNAVAILABLE
+            message:
+              type: string
+              description: Human-readable error description
+              example: "No relevant information found in the book"
+            details:
+              type: object
+              additionalProperties: true
+              description: Additional error context (optional)
+
+  examples:
+    questionMessage:
+      summary: Example question with selected text
+      value:
+        type: question
+        question: "How does RAG retrieval work?"
+        selected_text: "RAG (Retrieval-Augmented Generation) combines retrieval..."
+        message_id: "550e8400-e29b-41d4-a716-446655440000"
+
+    answerCompleteMessage:
+      summary: Example complete answer with citations
+      value:
+        type: answer_complete
+        content: "RAG retrieval works by querying a vector database..."
+        citations:
+          - chapter: "Chapter 1"
+            section: "RAG Architecture"
+            chunk_id: 42
+            relevance_score: 0.89
+        confidence: 0.87
+        is_from_book: true
+        related_message_id: "550e8400-e29b-41d4-a716-446655440000"
+        timestamp: "2025-12-30T14:30:15Z"
+
+    errorMessage:
+      summary: Example error message
+      value:
+        type: error
+        code: RETRIEVAL_FAILED
+        message: "No relevant information found in the book"
